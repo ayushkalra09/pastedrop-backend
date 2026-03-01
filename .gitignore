@@ -1,0 +1,38 @@
+HELP.md
+target/
+lambda/
+
+.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.properties
+
+### IDE ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### NetBeans ###
+nbproject/private/
+nbbuild/
+dist/
+nbdist/
+.gradle/
+
+### VS Code ###
+.vscode/
+
+### Logs & Env ###
+*.log
+.env
+
+### Mac OS ###
+.DS_Store
