@@ -7,4 +7,5 @@ public class PasteResponse {
 
     private String keyID;
     private String downloadUrl;
+    private Long viewCount;
 }

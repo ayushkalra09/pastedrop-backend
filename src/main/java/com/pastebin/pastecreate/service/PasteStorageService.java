@@ -70,6 +70,7 @@ public class PasteStorageService {
         item.put("keyID", AttributeValue.builder().s(pasteId).build());
         item.put("s3ObjectKey", AttributeValue.builder().s(s3Key).build());
         item.put("createdAt", AttributeValue.builder().s(Instant.now().toString()).build());
+        item.put("viewCount", AttributeValue.builder().n("0").build());
 
         if (request.getTtl() != null) {
 
@@ -134,6 +135,25 @@ public class PasteStorageService {
             }
         }
 
+        //Updating view count
+        UpdateItemRequest updateRequest = UpdateItemRequest.builder()
+                .tableName(DYNAMO_TABLE)
+                .key(Map.of(
+                        "keyID", AttributeValue.builder().s(keyID).build()
+                ))
+                .updateExpression("ADD viewCount :inc")
+                .expressionAttributeValues(Map.of(
+                        ":inc", AttributeValue.builder().n("1").build()
+                ))
+                .returnValues(ReturnValue.UPDATED_NEW)
+                .build();
+
+        UpdateItemResponse updateResponse =
+                dynamoDbClient.updateItem(updateRequest);
+
+        String updatedViewCount =
+                updateResponse.attributes().get("viewCount").n();
+
         String s3ObjectKey = result.item().get("s3ObjectKey").s();
 
         String downloadUrl = generatePresignedUrl(s3ObjectKey);;
@@ -142,6 +162,7 @@ public class PasteStorageService {
 
         response.setKeyID(keyID);
         response.setDownloadUrl(downloadUrl);
+        response.setViewCount(Long.parseLong(updatedViewCount));
 
         return response;
     }
