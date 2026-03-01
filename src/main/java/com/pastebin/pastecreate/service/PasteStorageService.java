@@ -1,18 +1,23 @@
 package com.pastebin.pastecreate.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pastebin.pastecreate.model.OcrRequest;
 import com.pastebin.pastecreate.model.PasteRequest;
 import com.pastebin.pastecreate.model.PasteResponse;
 import org.springframework.stereotype.Service;
 
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
+import software.amazon.awssdk.services.rekognition.RekognitionClient;
+import software.amazon.awssdk.services.rekognition.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
+import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest;
@@ -31,6 +36,7 @@ public class PasteStorageService {
     private final DynamoDbClient dynamoDbClient;
     private final S3Client s3Client;
     private final S3Presigner presigner;
+    private final RekognitionClient rekognitionClient;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -49,6 +55,11 @@ public class PasteStorageService {
                 .build();
 
         this.presigner = S3Presigner.builder()
+                .region(region)
+                .credentialsProvider(DefaultCredentialsProvider.create())
+                .build();
+
+        this.rekognitionClient = RekognitionClient.builder()
                 .region(region)
                 .credentialsProvider(DefaultCredentialsProvider.create())
                 .build();
@@ -201,6 +212,38 @@ public class PasteStorageService {
         }
     }
 
+    public PasteResponse processOcr(OcrRequest request) throws Exception {
+
+        if (request.getBase64Image() == null || request.getBase64Image().isEmpty()) {
+            throw new IllegalArgumentException("Image is required");
+        }
+
+        // Decode Base64
+        byte[] imageBytes = Base64.getDecoder().decode(request.getBase64Image());
+
+        // Generate temporary image key
+        String imageKey = Base62GeneratorService.generateKey(8) + ".jpg";
+
+        // Upload image to S3
+        PutObjectRequest putObjectRequest = PutObjectRequest.builder()
+                .bucket(S3_BUCKET)
+                .key(imageKey)
+                .contentType("image/jpeg")
+                .build();
+
+        s3Client.putObject(putObjectRequest, RequestBody.fromBytes(imageBytes));
+
+        // Extract text using Rekognition
+        String extractedText = extractTextFromImage(imageKey);
+
+        // Now create normal paste using extracted text
+        PasteRequest pasteRequest = new PasteRequest();
+        pasteRequest.setContent(extractedText);
+        pasteRequest.setTtl(request.getTtl());
+
+        return createPaste(pasteRequest);
+    }
+
     private void uploadContentToS3(String key, String content) {
 
         s3Client.putObject(
@@ -253,5 +296,29 @@ public class PasteStorageService {
                         .build()
         );
         return response.hasItem();
+    }
+
+    private String extractTextFromImage(String s3Key) {
+
+        DetectTextRequest request = DetectTextRequest.builder()
+                .image(Image.builder()
+                        .s3Object(software.amazon.awssdk.services.rekognition.model.S3Object.builder()
+                                .bucket(S3_BUCKET)
+                                .name(s3Key)
+                                .build())
+                        .build())
+                .build();
+
+        DetectTextResponse response = rekognitionClient.detectText(request);
+
+        StringBuilder extractedText = new StringBuilder();
+
+        for (TextDetection text : response.textDetections()) {
+            if (text.type() == TextTypes.LINE) {
+                extractedText.append(text.detectedText()).append("\n");
+            }
+        }
+
+        return extractedText.toString();
     }
 }

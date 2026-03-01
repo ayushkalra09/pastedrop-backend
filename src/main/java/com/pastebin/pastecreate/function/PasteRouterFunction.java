@@ -1,6 +1,7 @@
 package com.pastebin.pastecreate.function;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pastebin.pastecreate.model.OcrRequest;
 import com.pastebin.pastecreate.model.PasteRequest;
 import com.pastebin.pastecreate.model.PasteResponse;
 import com.pastebin.pastecreate.service.PasteStorageService;
@@ -95,6 +96,18 @@ public class PasteRouterFunction {
 
                     response.setStatusCode(204);
                     response.setBody("");
+                    return response;
+                }
+
+                // OCR IMAGE → CREATE PASTE
+                if ("POST".equalsIgnoreCase(method) && path.equals("/ocr")) {
+
+                    OcrRequest ocrRequest = objectMapper.readValue(body, OcrRequest.class);
+
+                    PasteResponse result = pasteStorageService.processOcr(ocrRequest);
+
+                    response.setStatusCode(200);
+                    response.setBody(objectMapper.writeValueAsString(result));
                     return response;
                 }
 
