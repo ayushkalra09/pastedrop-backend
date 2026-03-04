@@ -1,9 +1,9 @@
 package com.pastebin.pastecreate.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pastebin.pastecreate.model.OcrRequest;
 import com.pastebin.pastecreate.model.PasteRequest;
 import com.pastebin.pastecreate.model.PasteResponse;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
@@ -17,7 +17,6 @@ import software.amazon.awssdk.services.rekognition.RekognitionClient;
 import software.amazon.awssdk.services.rekognition.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
-import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest;
@@ -37,8 +36,7 @@ public class PasteStorageService {
     private final S3Client s3Client;
     private final S3Presigner presigner;
     private final RekognitionClient rekognitionClient;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final BCryptPasswordEncoder passwordEncoder;
 
     public PasteStorageService() {
 
@@ -63,6 +61,8 @@ public class PasteStorageService {
                 .region(region)
                 .credentialsProvider(DefaultCredentialsProvider.create())
                 .build();
+
+        this.passwordEncoder = new BCryptPasswordEncoder();
     }
 
     public PasteResponse createPaste(PasteRequest request) throws Exception {
@@ -104,6 +104,13 @@ public class PasteStorageService {
                     .build());
         }
 
+        if (request.getPassword() != null && !request.getPassword().isBlank()) {
+            String passwordHash = passwordEncoder.encode(request.getPassword());
+
+            item.put("passwordHash",
+                    AttributeValue.builder().s(passwordHash).build());
+        }
+
         PutItemRequest putRequest = PutItemRequest.builder()
                 .tableName(DYNAMO_TABLE)
                 .item(item)
@@ -117,7 +124,7 @@ public class PasteStorageService {
         return response;
     }
 
-    public PasteResponse getPaste(String keyID) throws Exception {
+    public PasteResponse getPaste(String keyID, String password) throws Exception {
 
         GetItemRequest getRequest = GetItemRequest.builder()
                 .tableName(DYNAMO_TABLE)
@@ -146,6 +153,19 @@ public class PasteStorageService {
             }
         }
 
+        if (result.item().containsKey("passwordHash")) {
+
+            if (password == null || password.isBlank()) {
+                throw new RuntimeException("PASSWORD_REQUIRED");
+            }
+
+            String storedHash = result.item().get("passwordHash").s();
+
+            if (!passwordEncoder.matches(password, storedHash)) {
+                throw new RuntimeException("INVALID_PASSWORD");
+            }
+        }
+
         //Updating view count
         UpdateItemRequest updateRequest = UpdateItemRequest.builder()
                 .tableName(DYNAMO_TABLE)
@@ -167,7 +187,7 @@ public class PasteStorageService {
 
         String s3ObjectKey = result.item().get("s3ObjectKey").s();
 
-        String downloadUrl = generatePresignedUrl(s3ObjectKey);;
+        String downloadUrl = generatePresignedUrl(s3ObjectKey);
 
         PasteResponse response = new PasteResponse();
 
@@ -212,7 +232,7 @@ public class PasteStorageService {
         }
     }
 
-    public PasteResponse processOcr(OcrRequest request) throws Exception {
+    public PasteResponse processOcr(OcrRequest request, String password) throws Exception {
 
         if (request.getBase64Image() == null || request.getBase64Image().isEmpty()) {
             throw new IllegalArgumentException("Image is required");
@@ -236,10 +256,13 @@ public class PasteStorageService {
         // Extract text using Rekognition
         String extractedText = extractTextFromImage(imageKey);
 
+        deleteFromS3(imageKey);
+
         // Now create normal paste using extracted text
         PasteRequest pasteRequest = new PasteRequest();
         pasteRequest.setContent(extractedText);
         pasteRequest.setTtl(request.getTtl());
+        pasteRequest.setPassword(password);
 
         return createPaste(pasteRequest);
     }

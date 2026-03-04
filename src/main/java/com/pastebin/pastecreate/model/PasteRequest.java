@@ -6,4 +6,5 @@ import lombok.Data;
 public class PasteRequest {
     private String content;
     private Long ttl;
+    private String password;
 }

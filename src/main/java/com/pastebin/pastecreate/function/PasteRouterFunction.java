@@ -69,7 +69,13 @@ public class PasteRouterFunction {
                     String keyID = parts[2];
                     System.out.println("Fetching pasteID = " + keyID);
 
-                    PasteResponse result = pasteStorageService.getPaste(keyID);
+                    String password = null;
+
+                    if (request.getQueryStringParameters() != null) {
+                        password = request.getQueryStringParameters().get("password");
+                    }
+
+                    PasteResponse result = pasteStorageService.getPaste(keyID, password);
 
                     if (result == null) {
                         response.setStatusCode(404);
@@ -104,7 +110,7 @@ public class PasteRouterFunction {
 
                     OcrRequest ocrRequest = objectMapper.readValue(body, OcrRequest.class);
 
-                    PasteResponse result = pasteStorageService.processOcr(ocrRequest);
+                    PasteResponse result = pasteStorageService.processOcr(ocrRequest, ocrRequest.getPassword());
 
                     response.setStatusCode(200);
                     response.setBody(objectMapper.writeValueAsString(result));
@@ -116,21 +122,49 @@ public class PasteRouterFunction {
                 response.setBody("{\"message\":\"Unsupported route\"}");
                 return response;
 
+            }
+            catch (RuntimeException e) {
+
+                System.out.println("========== LAMBDA BUSINESS EXCEPTION ==========");
+                e.printStackTrace();
+
+                APIGatewayV2HTTPResponse errorResponse = new APIGatewayV2HTTPResponse();
+                errorResponse.setHeaders(Map.of(
+                        "Content-Type", "application/json",
+                        "Access-Control-Allow-Origin", "*"
+                ));
+
+                if ("PASSWORD_REQUIRED".equals(e.getMessage())) {
+                    errorResponse.setStatusCode(401);
+                    errorResponse.setBody("{\"error\":\"Password required\"}");
+                    return errorResponse;
+                }
+
+                if ("INVALID_PASSWORD".equals(e.getMessage())) {
+                    errorResponse.setStatusCode(403);
+                    errorResponse.setBody("{\"error\":\"Invalid password\"}");
+                    return errorResponse;
+                }
+
+                errorResponse.setStatusCode(500);
+                errorResponse.setBody("{\"error\":\"Internal server error\"}");
+                return errorResponse;
+
             } catch (Exception e) {
 
-                System.out.println("========== LAMBDA EXCEPTION ==========");
+                System.out.println("========== LAMBDA SYSTEM EXCEPTION ==========");
                 e.printStackTrace();
 
                 APIGatewayV2HTTPResponse errorResponse = new APIGatewayV2HTTPResponse();
                 errorResponse.setStatusCode(500);
-                errorResponse.setBody("{\"error\":\"" + e.getMessage() + "\"}");
+                errorResponse.setBody("{\"error\":\"Internal server error\"}");
                 errorResponse.setHeaders(Map.of(
                         "Content-Type", "application/json",
                         "Access-Control-Allow-Origin", "*"
                 ));
                 return errorResponse;
-
-            } finally {
+            }
+            finally {
                 System.out.println("========== LAMBDA REQUEST END ==========");
             }
         };

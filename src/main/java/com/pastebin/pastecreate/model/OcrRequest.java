@@ -6,4 +6,5 @@ import lombok.Data;
 public class OcrRequest {
     private String base64Image;
     private Long ttl;
+    private String password;
 }
