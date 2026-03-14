@@ -1,5 +1,7 @@
 package com.pastebin.pastecreate.service;
 
+import com.pastebin.pastecreate.enums.ErrorCode;
+import com.pastebin.pastecreate.exception.PasteException;
 import com.pastebin.pastecreate.model.OcrRequest;
 import com.pastebin.pastecreate.model.PasteRequest;
 import com.pastebin.pastecreate.model.PasteResponse;
@@ -88,7 +90,7 @@ public class PasteStorageService {
             long ttlSeconds = request.getTtl();
 
             if (ttlSeconds <= 0) {
-                throw new IllegalArgumentException("TTL must be positive");
+                throw new PasteException(ErrorCode.INVALID_REQUEST);
             }
 
             long maxAllowedTtl = 7 * 24 * 60 * 60; // 7 days
@@ -106,9 +108,7 @@ public class PasteStorageService {
 
         if (request.getPassword() != null && !request.getPassword().isBlank()) {
             String passwordHash = passwordEncoder.encode(request.getPassword());
-
-            item.put("passwordHash",
-                    AttributeValue.builder().s(passwordHash).build());
+            item.put("passwordHash", AttributeValue.builder().s(passwordHash).build());
         }
 
         PutItemRequest putRequest = PutItemRequest.builder()
@@ -116,7 +116,12 @@ public class PasteStorageService {
                 .item(item)
                 .build();
 
-        dynamoDbClient.putItem(putRequest);
+        try {
+            dynamoDbClient.putItem(putRequest);
+        } catch (Exception e) {
+            deleteFromS3(s3Key);
+            throw new PasteException(ErrorCode.INTERNAL_ERROR);
+        }
 
         PasteResponse response = new PasteResponse();
         response.setKeyID(pasteId);
@@ -145,10 +150,7 @@ public class PasteStorageService {
             long currentEpoch = Instant.now().getEpochSecond();
 
             if (currentEpoch > expiryEpoch) {
-
-                // Optionally delete it immediately
                 deletePaste(keyID);
-
                 return null;
             }
         }
@@ -156,17 +158,16 @@ public class PasteStorageService {
         if (result.item().containsKey("passwordHash")) {
 
             if (password == null || password.isBlank()) {
-                throw new RuntimeException("PASSWORD_REQUIRED");
+                throw new PasteException(ErrorCode.PASSWORD_REQUIRED);
             }
 
             String storedHash = result.item().get("passwordHash").s();
 
             if (!passwordEncoder.matches(password, storedHash)) {
-                throw new RuntimeException("INVALID_PASSWORD");
+                throw new PasteException(ErrorCode.INVALID_PASSWORD);
             }
         }
 
-        //Updating view count
         UpdateItemRequest updateRequest = UpdateItemRequest.builder()
                 .tableName(DYNAMO_TABLE)
                 .key(Map.of(
@@ -179,18 +180,15 @@ public class PasteStorageService {
                 .returnValues(ReturnValue.UPDATED_NEW)
                 .build();
 
-        UpdateItemResponse updateResponse =
-                dynamoDbClient.updateItem(updateRequest);
+        UpdateItemResponse updateResponse = dynamoDbClient.updateItem(updateRequest);
 
-        String updatedViewCount =
-                updateResponse.attributes().get("viewCount").n();
+        String updatedViewCount = updateResponse.attributes().get("viewCount").n();
 
         String s3ObjectKey = result.item().get("s3ObjectKey").s();
 
         String downloadUrl = generatePresignedUrl(s3ObjectKey);
 
         PasteResponse response = new PasteResponse();
-
         response.setKeyID(keyID);
         response.setDownloadUrl(downloadUrl);
         response.setViewCount(Long.parseLong(updatedViewCount));
@@ -201,7 +199,6 @@ public class PasteStorageService {
     public void deletePaste(String keyID) {
 
         try {
-
             GetItemResponse item = dynamoDbClient.getItem(
                     GetItemRequest.builder()
                             .tableName(DYNAMO_TABLE)
@@ -212,11 +209,8 @@ public class PasteStorageService {
             );
 
             if (item.hasItem()) {
-
                 String s3Key = item.item().get("s3ObjectKey").s();
-
                 deleteFromS3(s3Key);
-
                 dynamoDbClient.deleteItem(
                         DeleteItemRequest.builder()
                                 .tableName(DYNAMO_TABLE)
@@ -228,23 +222,20 @@ public class PasteStorageService {
             }
 
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new PasteException(ErrorCode.INTERNAL_ERROR);
         }
     }
 
     public PasteResponse processOcr(OcrRequest request, String password) throws Exception {
 
         if (request.getBase64Image() == null || request.getBase64Image().isEmpty()) {
-            throw new IllegalArgumentException("Image is required");
+            throw new PasteException(ErrorCode.INVALID_REQUEST);
         }
 
-        // Decode Base64
         byte[] imageBytes = Base64.getDecoder().decode(request.getBase64Image());
 
-        // Generate temporary image key
         String imageKey = Base62GeneratorService.generateKey(8) + ".jpg";
 
-        // Upload image to S3
         PutObjectRequest putObjectRequest = PutObjectRequest.builder()
                 .bucket(S3_BUCKET)
                 .key(imageKey)
@@ -253,12 +244,13 @@ public class PasteStorageService {
 
         s3Client.putObject(putObjectRequest, RequestBody.fromBytes(imageBytes));
 
-        // Extract text using Rekognition
-        String extractedText = extractTextFromImage(imageKey);
+        String extractedText;
+        try {
+            extractedText = extractTextFromImage(imageKey);
+        } finally {
+            deleteFromS3(imageKey);
+        }
 
-        deleteFromS3(imageKey);
-
-        // Now create normal paste using extracted text
         PasteRequest pasteRequest = new PasteRequest();
         pasteRequest.setContent(extractedText);
         pasteRequest.setTtl(request.getTtl());
@@ -268,15 +260,12 @@ public class PasteStorageService {
     }
 
     private void uploadContentToS3(String key, String content) {
-
         s3Client.putObject(
                 PutObjectRequest.builder()
                         .bucket(S3_BUCKET)
                         .key(key)
                         .build(),
-                software.amazon.awssdk.core.sync.RequestBody.fromBytes(
-                        content.getBytes(StandardCharsets.UTF_8)
-                )
+                RequestBody.fromBytes(content.getBytes(StandardCharsets.UTF_8))
         );
     }
 
@@ -287,20 +276,17 @@ public class PasteStorageService {
                 .key(key)
                 .build();
 
-        GetObjectPresignRequest presignRequest =
-                GetObjectPresignRequest.builder()
-                        .signatureDuration(Duration.ofMinutes(10)) // expires in 10 min
-                        .getObjectRequest(getObjectRequest)
-                        .build();
+        GetObjectPresignRequest presignRequest = GetObjectPresignRequest.builder()
+                .signatureDuration(Duration.ofMinutes(10))
+                .getObjectRequest(getObjectRequest)
+                .build();
 
-        PresignedGetObjectRequest presignedRequest =
-                presigner.presignGetObject(presignRequest);
+        PresignedGetObjectRequest presignedRequest = presigner.presignGetObject(presignRequest);
 
         return presignedRequest.url().toString();
     }
 
     private void deleteFromS3(String key) {
-
         s3Client.deleteObject(
                 DeleteObjectRequest.builder()
                         .bucket(S3_BUCKET)

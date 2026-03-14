@@ -16,6 +16,11 @@ public class Base62GeneratorService {
         // Encode to base62
         String encoded = encodeBase62(bigInt);
 
+        // Pad with '0' if shorter than requested length
+        while (encoded.length() < length) {
+            encoded = "0" + encoded;
+        }
+
         // Return desired length
         return encoded.substring(0, length);
     }
