@@ -6,6 +6,7 @@ import com.pastebin.pastecreate.exception.PasteException;
 import com.pastebin.pastecreate.model.OcrRequest;
 import com.pastebin.pastecreate.model.PasteRequest;
 import com.pastebin.pastecreate.model.PasteResponse;
+import com.pastebin.pastecreate.model.SummarizeResponse;
 import com.pastebin.pastecreate.service.PasteStorageService;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
@@ -40,6 +41,9 @@ public class PasteRouterFunction {
 
                 if ("POST".equalsIgnoreCase(method) && path.equals("/paste")) {
                     return createPaste(body);
+                }
+                if ("GET".equalsIgnoreCase(method) && path.matches("/paste/[^/]+/summarize")) {
+                    return summarizePaste(path, request);
                 }
                 if ("GET".equalsIgnoreCase(method) && path.startsWith("/paste/")) {
                     return getPaste(path, request);
@@ -96,6 +100,26 @@ public class PasteRouterFunction {
     private APIGatewayV2HTTPResponse processOcr(String body) throws Exception {
         OcrRequest ocrRequest = objectMapper.readValue(body, OcrRequest.class);
         PasteResponse result = pasteStorageService.processOcr(ocrRequest, ocrRequest.getPassword());
+        return buildResponse(200, objectMapper.writeValueAsString(result));
+    }
+
+    private APIGatewayV2HTTPResponse summarizePaste(String path, APIGatewayV2HTTPEvent request) throws Exception {
+        String[] parts = path.split("/");
+        if (parts.length < 4) throw new PasteException(ErrorCode.NOT_FOUND);
+        String keyID = parts[2];
+
+        String password = request.getQueryStringParameters() != null
+                ? request.getQueryStringParameters().get("password")
+                : null;
+
+        System.out.println("Summarizing pasteID = " + keyID);
+
+        SummarizeResponse result = pasteStorageService.summarizePaste(keyID, password);
+
+        if (result == null) {
+            return buildResponse(404, "{\"message\":\"Paste not found\"}");
+        }
+
         return buildResponse(200, objectMapper.writeValueAsString(result));
     }
 

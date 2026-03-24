@@ -5,10 +5,12 @@ import com.pastebin.pastecreate.exception.PasteException;
 import com.pastebin.pastecreate.model.OcrRequest;
 import com.pastebin.pastecreate.model.PasteRequest;
 import com.pastebin.pastecreate.model.PasteResponse;
+import com.pastebin.pastecreate.model.SummarizeResponse;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 
@@ -39,6 +41,7 @@ public class PasteStorageService {
     private final S3Presigner presigner;
     private final RekognitionClient rekognitionClient;
     private final BCryptPasswordEncoder passwordEncoder;
+    private BedrockService bedrockService;
 
     public PasteStorageService() {
 
@@ -65,6 +68,8 @@ public class PasteStorageService {
                 .build();
 
         this.passwordEncoder = new BCryptPasswordEncoder();
+
+        this.bedrockService = new BedrockService();
     }
 
     public PasteResponse createPaste(PasteRequest request) throws Exception {
@@ -259,6 +264,56 @@ public class PasteStorageService {
         return createPaste(pasteRequest);
     }
 
+    public SummarizeResponse summarizePaste(String keyID, String password) throws Exception {
+
+        // Reuse existing getPaste auth + existence check
+        GetItemRequest getRequest = GetItemRequest.builder()
+                .tableName(DYNAMO_TABLE)
+                .key(Map.of(
+                        "keyID", AttributeValue.builder().s(keyID).build()
+                ))
+                .build();
+
+        GetItemResponse result = dynamoDbClient.getItem(getRequest);
+
+        if (!result.hasItem()) {
+            return null;
+        }
+
+        // TTL check
+        if (result.item().containsKey("ttl")) {
+            long expiryEpoch = Long.parseLong(result.item().get("ttl").n());
+            if (Instant.now().getEpochSecond() > expiryEpoch) {
+                deletePaste(keyID);
+                return null;
+            }
+        }
+
+        // Password check
+        if (result.item().containsKey("passwordHash")) {
+            if (password == null || password.isBlank()) {
+                throw new PasteException(ErrorCode.PASSWORD_REQUIRED);
+            }
+            String storedHash = result.item().get("passwordHash").s();
+            if (!passwordEncoder.matches(password, storedHash)) {
+                throw new PasteException(ErrorCode.INVALID_PASSWORD);
+            }
+        }
+
+        // Fetch content from S3
+        String s3ObjectKey = result.item().get("s3ObjectKey").s();
+        String content = fetchContentFromS3(s3ObjectKey);
+
+        // Summarize via Bedrock
+        String summary = bedrockService.summarize(content);
+
+        SummarizeResponse response = new SummarizeResponse();
+        response.setKeyID(keyID);
+        response.setSummary(summary);
+
+        return response;
+    }
+
     private void uploadContentToS3(String key, String content) {
         s3Client.putObject(
                 PutObjectRequest.builder()
@@ -329,5 +384,17 @@ public class PasteStorageService {
         }
 
         return extractedText.toString();
+    }
+
+    private String fetchContentFromS3(String key) {
+
+        GetObjectRequest getObjectRequest = GetObjectRequest.builder()
+                .bucket(S3_BUCKET)
+                .key(key)
+                .build();
+
+        ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getObjectRequest);
+
+        return objectBytes.asUtf8String();
     }
 }
