@@ -31,44 +31,26 @@ public class BedrockService {
                 .credentialsProvider(DefaultCredentialsProvider.create())
                 .build();
         this.objectMapper = new ObjectMapper();
-        log.info("BedrockService initialized with Model ID: {} in region: {}", MODEL_ID, region);
+        log.info("event=SERVICE_INIT service=BedrockService region={}", region);
     }
 
-    public String summarize(String content) throws Exception {
-        log.debug("Received summarization request. Content length: {} characters",
-                content != null ? content.length() : 0);
-
+    public String summarize(String content, String requestId) throws Exception {
         if (content == null || content.isBlank()) {
-            log.warn("Empty content provided for summarization.");
+            log.warn("event=BEDROCK_SKIP requestId={} reason=empty_content", requestId);
             return "Nothing to summarize.";
         }
 
-        // Truncation logic with logging
-        String truncatedContent;
-        if (content.length() > MAX_INPUT_CHARS) {
-            log.info("Content length ({}) exceeds limit. Truncating to {} chars.",
-                    content.length(), MAX_INPUT_CHARS);
-            truncatedContent = content.substring(0, MAX_INPUT_CHARS) + "...";
-        } else {
-            truncatedContent = content;
-        }
+        String truncatedContent = content.length() > MAX_INPUT_CHARS
+                ? content.substring(0, MAX_INPUT_CHARS) + "..."
+                : content;
 
         String prompt = "Summarize the following text in 2-3 sentences:\n\n" + truncatedContent;
 
         Map<String, Object> requestBody = Map.of(
                 "messages", List.of(
-                        Map.of(
-                                "role", "user",
-                                "content", List.of(
-                                        Map.of("text", prompt)
-                                )
-                        )
+                        Map.of("role", "user", "content", List.of(Map.of("text", prompt)))
                 ),
-                "inferenceConfig", Map.of(
-                        "maxTokens", MAX_TOKENS,
-                        "temperature", 0.5,
-                        "topP", 0.9
-                )
+                "inferenceConfig", Map.of("maxTokens", MAX_TOKENS, "temperature", 0.5, "topP", 0.9)
         );
 
         String requestJson = objectMapper.writeValueAsString(requestBody);
@@ -82,34 +64,25 @@ public class BedrockService {
 
         long startTime = System.currentTimeMillis();
         try {
-            log.info("Invoking Bedrock model: {}", MODEL_ID);
+            log.info("event=BEDROCK_INVOKE_START requestId={} model={}", requestId, MODEL_ID);
             InvokeModelResponse invokeResponse = bedrockClient.invokeModel(invokeRequest);
             long duration = System.currentTimeMillis() - startTime;
 
             String responseJson = invokeResponse.body().asUtf8String();
-            log.debug("Bedrock raw response received in {}ms: {}", duration, responseJson);
 
-            // Parsing with error handling/logging
             Map<?, ?> parsed = objectMapper.readValue(responseJson, Map.class);
             Map<?, ?> output = (Map<?, ?>) parsed.get("output");
             Map<?, ?> message = (Map<?, ?>) output.get("message");
             List<?> contentList = (List<?>) message.get("content");
-
-            if (contentList == null || contentList.isEmpty()) {
-                log.error("Bedrock returned an empty content list. Response: {}", responseJson);
-                return "Error: AI generated an empty response.";
-            }
-
             Map<?, ?> first = (Map<?, ?>) contentList.get(0);
-            String summary = first.get("text").toString().trim();
 
-            log.info("Successfully generated summary. Length: {} chars. Duration: {}ms",
-                    summary.length(), duration);
+            String summary = first.get("text").toString().trim();
+            log.info("event=BEDROCK_INVOKE_SUCCESS requestId={} duration_ms={} summary_len={}",
+                    requestId, duration, summary.length());
 
             return summary;
-
         } catch (Exception e) {
-            log.error("Failed to invoke Bedrock model {}. Error: {}", MODEL_ID, e.getMessage(), e);
+            log.error("event=BEDROCK_INVOKE_ERROR requestId={} message={}", requestId, e.getMessage(), e);
             throw e;
         }
     }
