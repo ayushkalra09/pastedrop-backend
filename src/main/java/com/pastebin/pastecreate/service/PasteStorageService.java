@@ -300,12 +300,36 @@ public class PasteStorageService {
             }
         }
 
+        if (result.item().containsKey("summary")) {
+            String cachedSummary = result.item().get("summary").s();
+
+            SummarizeResponse response = new SummarizeResponse();
+            response.setKeyID(keyID);
+            response.setSummary(cachedSummary);
+
+            return response;
+        }
+
         // Fetch content from S3
         String s3ObjectKey = result.item().get("s3ObjectKey").s();
         String content = fetchContentFromS3(s3ObjectKey);
 
         // Summarize via Bedrock
         String summary = bedrockService.summarize(content);
+
+        UpdateItemRequest updateRequest = UpdateItemRequest.builder()
+                .tableName(DYNAMO_TABLE)
+                .key(Map.of(
+                        "keyID", AttributeValue.builder().s(keyID).build()
+                ))
+                .updateExpression("SET summary = :s, summaryGeneratedAt = :t")
+                .expressionAttributeValues(Map.of(
+                        ":s", AttributeValue.builder().s(summary).build(),
+                        ":t", AttributeValue.builder().s(Instant.now().toString()).build()
+                ))
+                .build();
+
+        dynamoDbClient.updateItem(updateRequest);
 
         SummarizeResponse response = new SummarizeResponse();
         response.setKeyID(keyID);
