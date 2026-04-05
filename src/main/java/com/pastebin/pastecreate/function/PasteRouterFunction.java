@@ -1,14 +1,9 @@
 package com.pastebin.pastecreate.function;
 
-import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
-import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pastebin.pastecreate.enums.ErrorCode;
 import com.pastebin.pastecreate.exception.PasteException;
-import com.pastebin.pastecreate.model.OcrRequest;
-import com.pastebin.pastecreate.model.PasteRequest;
-import com.pastebin.pastecreate.model.PasteResponse;
-import com.pastebin.pastecreate.model.SummarizeResponse;
+import com.pastebin.pastecreate.model.*;
 import com.pastebin.pastecreate.service.PasteStorageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +11,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -29,111 +26,140 @@ public class PasteRouterFunction {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private static final Map<String, String> CORS_HEADERS = Map.of(
-            "Content-Type", "application/json",
-            "Access-Control-Allow-Origin", "*"
-    );
-
     @Bean
-    public Function<APIGatewayV2HTTPEvent, APIGatewayV2HTTPResponse> pasteRouter() {
-        return request -> {
-
-            String requestId = request.getRequestContext().getRequestId();
-            String method = request.getRequestContext().getHttp().getMethod();
-            String path = normalizePath(request.getRawPath());
-
-            log.info("event=ROUTER_START requestId={} method={} path={}", requestId, method, path);
-
+    public Function<Map<String, Object>, Map<String, Object>> pasteRouter() {
+        return event -> {
             try {
-                String body = request.getBody();
-
-                // 1. Create Paste
-                if ("POST".equalsIgnoreCase(method) && path.equals("/paste")) {
-                    PasteRequest pasteRequest = objectMapper.readValue(body, PasteRequest.class);
-                    PasteResponse result = pasteStorageService.createPaste(pasteRequest, requestId);
-                    return buildResponse(201, objectMapper.writeValueAsString(result));
+                if (isSqsEvent(event)) {
+                    handleSqsEvent(event);
+                    return null;
                 }
-
-                // 2. Summarize Paste
-                if ("GET".equalsIgnoreCase(method) && path.matches("/paste/[^/]+/summarize")) {
-                    String keyID = path.split("/")[2];
-                    String password = getQueryParam(request, "password");
-                    SummarizeResponse result = pasteStorageService.summarizePaste(keyID, password, requestId);
-
-                    if (result == null) return buildResponse(404, "{\"message\":\"Paste not found\"}");
-                    return buildResponse(200, objectMapper.writeValueAsString(result));
-                }
-
-                // 3. Get Paste
-                if ("GET".equalsIgnoreCase(method) && path.startsWith("/paste/")) {
-                    String keyID = extractKeyID(path);
-                    String password = getQueryParam(request, "password");
-                    PasteResponse result = pasteStorageService.getPaste(keyID, password, requestId);
-
-                    if (result == null) return buildResponse(404, "{\"message\":\"Paste not found\"}");
-                    return buildResponse(200, objectMapper.writeValueAsString(result));
-                }
-
-                // 4. Delete Paste
-                if ("DELETE".equalsIgnoreCase(method) && path.startsWith("/paste/")) {
-                    String keyID = extractKeyID(path);
-                    pasteStorageService.deletePaste(keyID, requestId);
-                    return buildResponse(204, "");
-                }
-
-                // 5. OCR Process
-                if ("POST".equalsIgnoreCase(method) && path.equals("/ocr")) {
-                    OcrRequest ocrRequest = objectMapper.readValue(body, OcrRequest.class);
-                    PasteResponse result = pasteStorageService.processOcr(ocrRequest, ocrRequest.getPassword(), requestId);
-                    return buildResponse(200, objectMapper.writeValueAsString(result));
-                }
-
-                log.warn("event=ROUTER_UNSUPPORTED requestId={} method={} path={}", requestId, method, path);
-                return buildResponse(400, "{\"message\":\"Unsupported route\"}");
-
-            } catch (PasteException e) {
-                log.warn("event=ROUTER_BUSINESS_EX requestId={} code={}", requestId, e.getErrorCode());
-                return handlePasteException(e);
+                return handleApiGatewayEvent(event);
             } catch (Exception e) {
-                log.error("event=ROUTER_FATAL_ERROR requestId={} message={}", requestId, e.getMessage(), e);
+                log.error("event=CRITICAL_ROUTER_FAILURE error={}", e.getMessage(), e);
                 return buildResponse(500, "{\"error\":\"Internal server error\"}");
-            } finally {
-                log.info("event=ROUTER_END requestId={}", requestId);
             }
         };
     }
 
-    private APIGatewayV2HTTPResponse handlePasteException(PasteException e) {
-        return switch (e.getErrorCode()) {
-            case PASSWORD_REQUIRED -> buildResponse(401, "{\"error\":\"Password required\"}");
-            case INVALID_PASSWORD  -> buildResponse(403, "{\"error\":\"Invalid password\"}");
-            case NOT_FOUND         -> buildResponse(404, "{\"error\":\"Not found\"}");
-            default                -> buildResponse(500, "{\"error\":\"Internal server error\"}");
-        };
+    private boolean isSqsEvent(Map<String, Object> event) {
+        return event.containsKey("Records") && event.get("Records") instanceof List;
     }
 
-    private APIGatewayV2HTTPResponse buildResponse(int statusCode, String body) {
-        APIGatewayV2HTTPResponse response = new APIGatewayV2HTTPResponse();
-        response.setStatusCode(statusCode);
-        response.setBody(body);
-        response.setHeaders(CORS_HEADERS);
+    @SuppressWarnings("unchecked")
+    private void handleSqsEvent(Map<String, Object> event) {
+        List<Map<String, Object>> records = (List<Map<String, Object>>) event.get("Records");
+        for (Map<String, Object> record : records) {
+            try {
+                String body = (String) record.get("body");
+                Map<String, String> payload = objectMapper.readValue(body, Map.class);
+                pasteStorageService.processBackgroundSummary(payload.get("keyID"), payload.get("requestId"));
+            } catch (Exception e) {
+                log.error("event=SQS_WORKER_ERROR messageId={}", record.get("messageId"), e);
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> handleApiGatewayEvent(Map<String, Object> event) {
+        Map<String, Object> requestContext = (Map<String, Object>) event.getOrDefault("requestContext", Map.of());
+        Map<String, Object> http = (Map<String, Object>) requestContext.getOrDefault("http", Map.of());
+
+        String requestId = (String) requestContext.get("requestId");
+        String method    = (String) http.get("method");
+        String rawPath   = (String) event.getOrDefault("rawPath", event.get("path"));
+        String path      = normalizePath(rawPath);
+        String body      = (String) event.get("body");
+
+        Map<String, String> queryParams = (Map<String, String>) event.get("queryStringParameters");
+        String password = (queryParams != null) ? queryParams.get("password") : null;
+
+        log.info("event=API_START requestId={} method={} path={}", requestId, method, path);
+
+        try {
+            // POST /paste
+            if ("POST".equalsIgnoreCase(method) && "/paste".equals(path)) {
+                PasteRequest req = objectMapper.readValue(body, PasteRequest.class);
+                PasteResponse res = pasteStorageService.createPaste(req, requestId);
+                return buildResponse(201, objectMapper.writeValueAsString(res));
+            }
+
+            // GET /paste/{id}/summarize
+            if ("GET".equalsIgnoreCase(method) && path.matches("/paste/[^/]+/summarize")) {
+                String keyID = path.split("/")[2];
+                SummarizeResponse res = pasteStorageService.summarizePaste(keyID, password, requestId);
+                if (res == null) return buildResponse(404, "{\"error\":\"Paste not found\"}");
+                return buildResponse(200, objectMapper.writeValueAsString(res));
+            }
+
+            // GET /paste/{id}
+            if ("GET".equalsIgnoreCase(method) && path.startsWith("/paste/")) {
+                String keyID = extractKeyFromPath(path);
+                PasteResponse res = pasteStorageService.getPaste(keyID, password, requestId);
+                if (res == null) return buildResponse(404, "{\"error\":\"Paste not found\"}");
+                return buildResponse(200, objectMapper.writeValueAsString(res));
+            }
+
+            // DELETE /paste/{id}
+            if ("DELETE".equalsIgnoreCase(method) && path.startsWith("/paste/")) {
+                String keyID = extractKeyFromPath(path);
+                pasteStorageService.deletePaste(keyID, requestId);
+                return buildResponse(204, "");
+            }
+
+            // POST /ocr
+            if ("POST".equalsIgnoreCase(method) && "/ocr".equals(path)) {
+                OcrRequest req = objectMapper.readValue(body, OcrRequest.class);
+                PasteResponse res = pasteStorageService.processOcr(req, req.getPassword(), requestId);
+                return buildResponse(200, objectMapper.writeValueAsString(res));
+            }
+
+            log.warn("event=UNSUPPORTED_ROUTE path={}", path);
+            return buildResponse(404, "{\"error\":\"Route not found\"}");
+
+        } catch (PasteException e) {
+            return handlePasteException(e);
+        } catch (Exception e) {
+            log.error("event=API_FATAL_ERROR requestId={} error={}", requestId, e.getMessage(), e);
+            return buildResponse(500, "{\"error\":\"Internal server error\"}");
+        }
+    }
+
+    private Map<String, Object> buildResponse(int statusCode, String body) {
+        Map<String, Object> response = new HashMap<>();
+        response.put("statusCode", statusCode);
+        response.put("body", body);
+        response.put("headers", Map.of(
+                "Content-Type", "application/json",
+                "Access-Control-Allow-Origin", "*",
+                "Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS"
+        ));
+        response.put("isBase64Encoded", false);
         return response;
     }
 
-    private String extractKeyID(String path) {
+    private Map<String, Object> handlePasteException(PasteException e) {
+        int code = switch (e.getErrorCode()) {
+            case PASSWORD_REQUIRED -> 401;
+            case INVALID_PASSWORD  -> 403;
+            case NOT_FOUND         -> 404;
+            default                -> 500;
+        };
+        return buildResponse(code, String.format("{\"error\":\"%s\"}", e.getErrorCode()));
+    }
+
+    private String extractKeyFromPath(String path) {
         String[] parts = path.split("/");
         if (parts.length < 3) throw new PasteException(ErrorCode.NOT_FOUND);
         return parts[2];
     }
 
-    private String getQueryParam(APIGatewayV2HTTPEvent request, String key) {
-        return (request.getQueryStringParameters() != null)
-                ? request.getQueryStringParameters().get(key)
-                : null;
-    }
-
     private String normalizePath(String path) {
         if (path == null) return "";
-        return path.startsWith("/prod") ? path.replaceFirst("/prod", "") : path;
+        String clean = path.startsWith("/prod") ? path.replaceFirst("/prod", "") : path;
+        if (!clean.startsWith("/")) clean = "/" + clean;
+        if (clean.length() > 1 && clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+        return clean;
     }
 }
